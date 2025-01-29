@@ -4,4 +4,4 @@ pillow==10.0.0
 keyboard==0.13.5
 python-dotenv==1.0.0
 uiautomation==2.0.18
-ollama==0.1.5 
+ollama==0.1.6 

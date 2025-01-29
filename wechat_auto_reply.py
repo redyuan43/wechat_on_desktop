@@ -26,6 +26,7 @@ class WeChatAutoReply:
         self.reply_interval = 60  # 对同一个联系人的回复间隔（秒）
         self.last_operation_time = 0  # 记录上次操作时间
         self.min_operation_interval = 2  # 最小操作间隔
+        self.current_window_index = 0  # 当前处理的微信窗口索引
         try:
             self.ollama_client = ollama
             # 初始化两个模型：文本模型和多模态模型
@@ -49,26 +50,68 @@ class WeChatAutoReply:
             time.sleep(self.min_operation_interval)
         self.last_operation_time = time.time()
 
-    def find_wechat_window(self):
-        """查找微信主窗口"""
+    def find_all_wechat_windows(self):
+        """查找所有微信主窗口"""
         try:
-            # 查找微信主窗口
-            wechat = auto.WindowControl(searchDepth=1, ClassName='WeChatMainWndForPC')
-            if not wechat.Exists():
-                logging.error("未找到微信窗口，请确保微信已登录并打开")
-                return None
+            # 查找所有微信主窗口
+            wechat_windows = []
+            all_windows = auto.GetRootControl().GetChildren()
+            for window in all_windows:
+                try:
+                    if window.ClassName == 'WeChatMainWndForPC':
+                        wechat_windows.append(window)
+                except:
+                    continue
             
-            # 确保窗口处于前台
-            if not wechat.SetFocus():
-                logging.warning("无法将微信窗口置于前台")
-            else:
-                logging.info("成功找到微信窗口并置于前台")
-                # 等待窗口完全激活
-                time.sleep(1)
+            if not wechat_windows:
+                logging.error("未找到任何微信窗口，请确保微信已登录并打开")
+                return []
             
-            return wechat
+            logging.info(f"找到 {len(wechat_windows)} 个微信窗口")
+            return wechat_windows
         except Exception as e:
             logging.error(f"查找微信窗口时出错: {str(e)}")
+            return []
+
+    def switch_to_next_window(self, wechat_windows):
+        """切换到下一个微信窗口"""
+        if not wechat_windows:
+            return None
+        
+        # 更新当前窗口索引
+        self.current_window_index = (self.current_window_index + 1) % len(wechat_windows)
+        current_window = wechat_windows[self.current_window_index]
+        
+        try:
+            # 确保窗口处于前台
+            if current_window.SetFocus():
+                logging.info(f"切换到第 {self.current_window_index + 1} 个微信窗口")
+                # 等待窗口完全激活
+                time.sleep(1)
+                
+                # 尝试点击左侧区域以确保焦点回到会话列表
+                try:
+                    # 获取窗口位置
+                    rect = current_window.BoundingRectangle
+                    # 计算左侧区域的位置（窗口左边缘往右100像素，垂直中间位置）
+                    x = rect.left + 100
+                    y = (rect.top + rect.bottom) // 2
+                    # 点击左侧区域
+                    auto.Click(x, y)
+                    self.random_sleep(0.5, 1)
+                    
+                    # 再次尝试通过快捷键切换到会话列表
+                    auto.SendKeys('{Alt}1')
+                    self.random_sleep(0.5, 1)
+                except Exception as e:
+                    logging.warning(f"尝试点击左侧区域时出错: {str(e)}")
+                
+                return current_window
+            else:
+                logging.warning(f"无法将第 {self.current_window_index + 1} 个微信窗口置于前台")
+                return None
+        except Exception as e:
+            logging.error(f"切换窗口时出错: {str(e)}")
             return None
 
     def find_chat_list_panel(self, wechat_window):
@@ -195,10 +238,10 @@ class WeChatAutoReply:
                         logging.info(f"跳过特殊账号: {item_name}")
                         continue
 
-                    # 记录详细的群聊检测信息
-                    if self.is_group_chat(item_name, item_value):
-                        logging.info(f"跳过群聊 - 名称: {item_name}, 值: {item_value}")
-                        continue
+                    # # 记录详细的群聊检测信息
+                    # if self.is_group_chat(item_name, item_value):
+                    #     logging.info(f"跳过群聊 - 名称: {item_name}, 值: {item_value}")
+                    #     continue
                     
                     # 检查是否有新消息
                     has_new_message = False
@@ -213,21 +256,16 @@ class WeChatAutoReply:
                     else:
                         contact_name = clean_name
                     
-                    # 检查是否真的有新消息
-                    has_new_message = (
-                        "条新消息" in item_name or
-                        (item_value and "新消息" in item_value) or
-                        (item_value and "[" in item_value and "条]" in item_value) or
-                        (item_value and not item_value.endswith("置顶") and ("：" not in item_value or item_value.startswith("[")))
-                    )
+                    # 检查是否真的有新消息 - 只检查"条新消息"标记
+                    has_new_message = "条新消息" in item_name
                     
                     if has_new_message and contact_name:
                         logging.info(f"发现新消息，联系人: {contact_name}")
                         
-                        # 再次确认不是群聊
-                        if self.is_group_chat(contact_name, item_value):
-                            logging.info(f"二次确认为群聊，跳过: {contact_name}")
-                            continue
+                        # # 再次确认不是群聊
+                        # if self.is_group_chat(contact_name, item_value):
+                        #     logging.info(f"二次确认为群聊，跳过: {contact_name}")
+                        #     continue
                         
                         # 检查回复间隔
                         current_time = time.time()
@@ -358,6 +396,8 @@ class WeChatAutoReply:
             # 发生错误时，使用关键词匹配作为备选方案
             return any(keyword in message for keyword in new_year_keywords)
 
+#    - 结合对方的祝福内容，体现感谢和互祝的情感。
+
     def generate_greeting_reply(self, original_message):
         """使用Ollama生成个性化拜年回复"""
         try:
@@ -366,7 +406,8 @@ class WeChatAutoReply:
 1. 核心主题：
    - 围绕"蛇年祥瑞"展开，使用灵蛇、金蛇、祥蛇等意象
    - 突出智慧（如"灵蛇献智"）、灵活（如"蛇行顺畅"）、吉祥（如"福寿双全"）等关键词
-   - 结合对方的祝福内容，体现感谢和互祝的情感
+   - 体现感谢和互祝的情感
+   - 但是对方说的祝福语，回复的内容里面不要带相同的祝福语
    - 不要使用"如龙"、"似虎"等任何动物比喻
 
 回复要求：
@@ -378,16 +419,17 @@ class WeChatAutoReply:
    - 使用蛇年元素（如：智慧、灵动、吉祥）
    - 包含2-3个祝福点（事业、健康、家庭等）
    - 可以用"蒸蒸日上"、"福寿双全"等传统吉祥语
+#    - 可以考虑一些幽默的祝福语
 
 3. 格式：
-   - 字数限制在30字以内
+   - 字数限制在40字以内
    - 语言优美，感情真挚
 
-示例回复：
-"谢谢您的祝福！祝您蛇年智慧永伴，事业蒸蒸日上，家庭幸福安康！"
-"感谢美好祝愿！愿您蛇年福气蜿蜒来，智慧如灵蛇，事业展宏图！"
+# 示例回复：
+# "谢谢您的祝福！祝您蛇年智慧永伴，事业蒸蒸日上，家庭幸福安康！"
+# "感谢美好祝愿！愿您蛇年福气蜿蜒来，智慧如灵蛇，事业展宏图！"
 
-直接输出祝福语，不要有任何解释。"""
+直接输出祝福语，不要有任何解释、标点符号或引号。"""
 
             user_prompt = f"收到的拜年祝福：{original_message}\n请生成回复："
             
@@ -417,9 +459,12 @@ class WeChatAutoReply:
             # 移除可能的标签
             actual_reply = actual_reply.replace('<think>', '').replace('</think>', '')
             
+            # 移除外层的双引号（如果存在）
+            actual_reply = actual_reply.strip('"')
+            
             # 如果生成的回复为空，使用备选回复
             if not actual_reply:
-                return "谢谢您的祝福！祝您蛇年大吉，万事如意！"
+                return "谢谢您的祝福！祝您蛇年大吉，万事如意！".strip('"')
             
             logging.info(f"生成的回复：{actual_reply}")
             logging.info(f"字数：{len(actual_reply)}")
@@ -428,7 +473,7 @@ class WeChatAutoReply:
             
         except Exception as e:
             logging.error(f"生成拜年回复时出错: {str(e)}")
-            return "谢谢您的祝福！祝您蛇年大吉，万事如意！"
+            return "谢谢您的祝福！祝您蛇年大吉，万事如意！".strip('"')
 
     def get_last_message(self, wechat_window):
         """获取最后一条消息内容，包括文本和图片"""
@@ -570,23 +615,29 @@ class WeChatAutoReply:
                 current_time = time.time()
                 # 检查是否达到检查间隔
                 if current_time - last_check_time < check_interval:
-                    time.sleep(0.5)  # 短暂休眠以减少CPU使用
+                    time.sleep(0.1)  # 短暂休眠以减少CPU使用
                     continue
                 
                 last_check_time = current_time
                 check_interval = random.randint(8, 15)  # 每次检查后重新设置随机间隔
                 
-                # 查找微信窗口
-                wechat_window = self.find_wechat_window()
-                if not wechat_window:
+                # 查找所有微信窗口
+                wechat_windows = self.find_all_wechat_windows()
+                if not wechat_windows:
                     print("等待微信窗口...")
                     time.sleep(check_interval)
                     continue
                 
+                # 切换到下一个微信窗口
+                current_window = self.switch_to_next_window(wechat_windows)
+                if not current_window:
+                    self.random_sleep(1, 2)
+                    continue
+                
                 # 检查新消息
-                contact_name = self.check_new_message(wechat_window)
+                contact_name = self.check_new_message(current_window)
                 if contact_name:
-                    self.send_auto_reply(wechat_window, contact_name)
+                    self.send_auto_reply(current_window, contact_name)
                     consecutive_errors = 0  # 重置错误计数
                 else:
                     self.random_sleep(1, 3)  # 没有新消息时随机休眠
